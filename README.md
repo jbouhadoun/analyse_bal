@@ -1,4 +1,4 @@
-# 🗺️ BAL Analysis Dashboard
+# BAL Analysis Dashboard
 
 Dashboard Streamlit pour l'analyse des Bases Adresses Locales.
 
