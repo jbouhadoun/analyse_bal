@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-BAL Analysis Dashboard v2
-Complete dashboard with filters, statistics, and visualizations
+BAL Analysis Dashboard v10
+Complete dashboard with filters, statistics, visualizations + Shared IDs detection
 """
 
 import streamlit as st
@@ -20,7 +20,6 @@ DB_PATH = Path('data/bal_analysis_v2.db')
 
 st.set_page_config(
     page_title="BAL Analysis Dashboard",
-    page_icon="🗺️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -61,7 +60,7 @@ def load_communes(_conn, filters=None):
             volatility_class, volatility, validation_valid,
             recent_stability_score, avg_stability_score, is_improving,
             producer_changes_count, mandataire_changes_count, organisation_changes_count,
-            last_revision_date, has_bal
+            last_revision_date, has_bal, has_shared_ids, shared_ids_count
         FROM communes
         WHERE 1=1
     """
@@ -110,6 +109,9 @@ def load_communes(_conn, filters=None):
         if filters.get('without_id_adresse'):
             query += " AND has_id_ban_adresse = 0"
         
+        if filters.get('with_shared_ids'):
+            query += " AND has_shared_ids = 1"
+        
         if filters.get('with_producer_changes'):
             query += " AND producer_changes_count >= 1"
         
@@ -123,6 +125,21 @@ def load_communes(_conn, filters=None):
     
     df = pd.read_sql_query(query, _conn, params=params if params else None)
     return df
+
+@st.cache_data(ttl=60)
+def load_shared_ids(_conn, code_commune=None):
+    """Load shared IDs details."""
+    if code_commune:
+        query = """
+            SELECT id_value, id_type, communes_list, nb_communes
+            FROM shared_ids
+            WHERE communes_list LIKE ?
+            ORDER BY nb_communes DESC
+        """
+        return pd.read_sql_query(query, _conn, params=[f'%{code_commune}%'])
+    else:
+        query = "SELECT * FROM shared_ids ORDER BY nb_communes DESC LIMIT 100"
+        return pd.read_sql_query(query, _conn)
 
 @st.cache_data(ttl=60)
 def load_departements(_conn):
@@ -336,10 +353,11 @@ def show_filters(conn):
         
         st.sidebar.markdown("---")
         
-        # Identifiers (simplified)
+        # Identifiers (simplified + SHARED IDS)
         st.sidebar.subheader("Identifiants")
         filters['without_id_adresse'] = st.sidebar.checkbox("Sans identifiants")
         filters['with_uid_only'] = st.sidebar.checkbox("Avec uid_adresse")
+        filters['with_shared_ids'] = st.sidebar.checkbox("Avec IDs partagés")
         
         st.sidebar.markdown("---")
         
@@ -391,6 +409,9 @@ def show_overview(df):
     nb_with_uid = df['has_uid_adresse'].sum()
     nb_without_id_adresse = (df['has_id_ban_adresse'] == 0).sum()
     
+    # Shared IDs
+    nb_with_shared_ids = (df['has_shared_ids'] == 1).sum() if 'has_shared_ids' in df.columns else 0
+    
     # Average change rate
     avg_change_rate = df['change_rate'].mean() if not df['change_rate'].isna().all() else 0
     
@@ -438,8 +459,8 @@ def show_overview(df):
     
     st.markdown("---")
     
-    # Second row of metrics (simplified)
-    col1, col2, col3, col4 = st.columns(4)
+    # Second row of metrics (WITH SHARED IDS)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric(
@@ -465,6 +486,14 @@ def show_overview(df):
         )
     
     with col4:
+        st.metric(
+            "Avec IDs partagés",
+            f"{nb_with_shared_ids:,}",
+            f"{nb_with_shared_ids/total_communes*100:.1f}%" if total_communes > 0 else "0%",
+            help="Communes avec identifiants partagés avec d'autres communes"
+        )
+    
+    with col5:
         total_addresses = df['total_addresses'].sum()
         st.metric(
             "Total adresses",
@@ -558,8 +587,8 @@ def show_charts(df):
 # DETAILED TABLE
 # ============================================================================
 
-def show_detailed_table(df):
-    """Show detailed table with sorting and pagination."""
+def show_detailed_table(df, conn):
+    """Show detailed table with sorting and pagination + Shared IDs details."""
     
     st.header("Liste détaillée des communes")
     
@@ -572,7 +601,8 @@ def show_detailed_table(df):
             options=[
                 'change_rate', 'nom_commune', 'code_commune', 'total_addresses', 
                 'days_since_last_update', 'recent_stability_score', 'volatility', 
-                'producer_changes_count', 'mandataire_changes_count', 'organisation_changes_count'
+                'producer_changes_count', 'mandataire_changes_count', 'organisation_changes_count',
+                'shared_ids_count'
             ],
             format_func=lambda x: {
                 'change_rate': 'Taux de changement',
@@ -584,7 +614,8 @@ def show_detailed_table(df):
                 'volatility': 'Volatilité',
                 'producer_changes_count': 'Changements producteur',
                 'mandataire_changes_count': 'Changements mandataire',
-                'organisation_changes_count': 'Changements organisation'
+                'organisation_changes_count': 'Changements organisation',
+                'shared_ids_count': 'IDs partagés'
             }[x],
             index=0
         )
@@ -623,17 +654,24 @@ def show_detailed_table(df):
     
     df_page = df_sorted.iloc[start_idx:end_idx]
     
+    # Prepare display columns
+    display_cols = [
+        'code_commune', 'nom_commune', 'code_departement',
+        'producer', 'mandataire', 'organisation',
+        'change_rate', 'status', 'status_freshness',
+        'total_addresses',
+        'recent_stability_score', 'volatility', 'is_improving',
+        'producer_changes_count', 'mandataire_changes_count', 'organisation_changes_count',
+        'days_since_last_update'
+    ]
+    
+    # Add shared_ids_count if available
+    if 'shared_ids_count' in df_page.columns:
+        display_cols.append('shared_ids_count')
+    
     # Display table with all important columns
     st.dataframe(
-        df_page[[
-            'code_commune', 'nom_commune', 'code_departement',
-            'producer', 'mandataire', 'organisation',
-            'change_rate', 'status', 'status_freshness',
-            'total_addresses',
-            'recent_stability_score', 'volatility', 'is_improving',
-            'producer_changes_count', 'mandataire_changes_count', 'organisation_changes_count',
-            'days_since_last_update'
-        ]].rename(columns={
+        df_page[display_cols].rename(columns={
             'code_commune': 'Code',
             'nom_commune': 'Commune',
             'code_departement': 'Dept',
@@ -650,11 +688,39 @@ def show_detailed_table(df):
             'producer_changes_count': 'Ch. producteur',
             'mandataire_changes_count': 'Ch. mandataire',
             'organisation_changes_count': 'Ch. organisation',
-            'days_since_last_update': 'Jours MAJ'
+            'days_since_last_update': 'Jours MAJ',
+            'shared_ids_count': 'IDs partagés'
         }),
         use_container_width=True,
         height=400
     )
+    
+    # Show shared IDs details for communes with shared IDs
+    if 'has_shared_ids' in df_page.columns and (df_page['has_shared_ids'] == 1).any():
+        st.markdown("---")
+        st.subheader("Détails des IDs partagés")
+        
+        communes_with_shared = df_page[df_page['has_shared_ids'] == 1]
+        
+        selected_commune = st.selectbox(
+            "Sélectionner une commune pour voir les détails",
+            options=communes_with_shared['code_commune'].tolist(),
+            format_func=lambda x: f"{x} - {communes_with_shared[communes_with_shared['code_commune']==x]['nom_commune'].iloc[0]}"
+        )
+        
+        if selected_commune:
+            shared_ids_df = load_shared_ids(conn, selected_commune)
+            
+            if not shared_ids_df.empty:
+                st.write(f"**{len(shared_ids_df)} identifiant(s) partagé(s) détecté(s)**")
+                
+                for _, row in shared_ids_df.iterrows():
+                    with st.expander(f"**{row['id_type']}** : `{row['id_value'][:50]}...`"):
+                        st.write(f"**Partagé avec {row['nb_communes']} commune(s)** :")
+                        communes_list = row['communes_list'].split(',')
+                        st.write(", ".join(communes_list))
+            else:
+                st.info("Aucun détail disponible")
     
     st.caption(f"Affichage : {start_idx + 1}-{end_idx} sur {total_rows:,} communes")
     
@@ -874,7 +940,7 @@ def main():
     if is_sans_bal_mode:
         # SANS BAL MODE: Show ONLY the detailed list
         st.info("Mode Sans BAL : Affichage de la liste des communes uniquement")
-        show_detailed_table(df)
+        show_detailed_table(df, conn)
     
     else:
         # AVEC BAL MODE: Show all tabs
@@ -894,7 +960,7 @@ def main():
             show_charts(df)
         
         with tab2:
-            show_detailed_table(df)
+            show_detailed_table(df, conn)
         
         with tab3:
             show_departments_tab(conn)
